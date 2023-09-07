@@ -15,10 +15,9 @@ public class Main {
     public static List<Particle> receivedLeftBorderParticles = new ArrayList<>();
     public static List<Particle> receivedRightBorderParticles = new ArrayList<>();
 
-    public static ArrayList<Neighbor> neighbors;
+    public static ArrayList<Neighbor> neighbors = new ArrayList<>();
 
-
-    public static void main(String args[]) throws Exception {
+    public static void main(String[] args) throws Exception {
         MPI.Init(args);
         //id of root process
         int root = 0;
@@ -57,7 +56,7 @@ public class Main {
         particles = initializeParticles(particleCountPerProcess, fromX, toX);
 
         //initialize empty starting Grid
-        grid = updateGridSize(computingChunk, Physics.height, Physics.gridSize);
+        grid = updateGridSize(computingChunk);
 
         //add particles to the grid
         updateGrids(fromX);
@@ -78,7 +77,18 @@ public class Main {
             sendParticles(leftBorderParticles, rank - 1);
         else receivedRightBorderParticles = sendRecvParticles(leftBorderParticles, rank - 1, rank + 1);
 
+        //find neighbors in grid, including the ghost particles
+        findNeighbors();
 
+        //calculate pressure for each particle
+        calculatePressure();
+
+        //calculate force for each particle
+        calculateForce();
+
+        for (Particle particle : particles) particle.move();
+
+        //todo check if particles have now moved out of the process's computing area - if so then send it to another process. Receive particles from other processes
 
 
 
@@ -112,9 +122,10 @@ public class Main {
     }
 
     // Grid Updater: Updates the size of the grid and initializes it.
-    static Grid[][] updateGridSize(double width, double height, double gridSize) {
+    static Grid[][] updateGridSize(double width) {
+        double gridSize = Physics.gridSize;
         int gridLengthX = (int) Math.floor(width / gridSize) + 1;
-        Grid[][] grid = new Grid[(int) Math.floor(height / gridSize) + 1][gridLengthX];
+        Grid[][] grid = new Grid[(int) Math.floor(Physics.height / gridSize) + 1][gridLengthX];
 
         for (Grid[] gridArray : grid) {
             for (int i = 0; i < gridLengthX; i++) {
@@ -150,15 +161,15 @@ public class Main {
 
         // if not rank 0, add particles from leftmost cells
         if (rank != 0) {
-            for (int y = 0; y < grid.length; y++) {
-                leftBorderParticles.addAll(grid[y][0].getParticlesInGrid());
+            for (Grid[] grids : grid) {
+                leftBorderParticles.addAll(grids[0].getParticlesInGrid());
             }
         }
 
         // if not max rank, add particles from rightmost cells
         if (rank != size - 1) {
-            for (int y = 0; y < grid.length; y++) {
-                rightBorderParticles.addAll(grid[y][grid[0].length - 1].getParticlesInGrid());
+            for (Grid[] grids : grid) {
+                rightBorderParticles.addAll(grids[grid[0].length - 1].getParticlesInGrid());
             }
         }
     }
@@ -191,8 +202,8 @@ public class Main {
     public static List<Particle> receiveParticles(int sourceRank) throws IOException, ClassNotFoundException {
         byte[] buffer = new byte[2048];
         MPI.COMM_WORLD.Recv(buffer, 0, buffer.length, MPI.BYTE, sourceRank, 0);
-        List<Particle> recievedParticles = (List<Particle>) deserialize(buffer);
-        return recievedParticles;
+        List<Particle> receivedParticles = (List<Particle>) deserialize(buffer);
+        return receivedParticles;
     }
 
     //todo check how much is 1 particle in bytes and appropriately change size of buffer.
@@ -207,5 +218,80 @@ public class Main {
         );
         List<Particle> receivedParticles = (List<Particle>) deserialize(recvBuffer);
         return receivedParticles;
+    }
+
+    //findNeighbors: Clears previous neighbors list and finds current neighbors for each particle in the simulation
+    static void findNeighbors() {
+        neighbors.clear();
+        int gridSize = Physics.gridSize;
+
+        for (Particle particle : particles) {
+            int gridX = particle.gridX;
+            int gridY = particle.gridY;
+
+            findNeighborsInGrid(particle, grid[gridY][gridX]);
+            try {
+                int maxX = (int) (Physics.width / gridSize) - 1;
+                int maxY = (int) (Physics.height / gridSize) - 1;
+
+                if (gridX == 0) {
+                    findNeighborsInGhostParticles(particle, receivedLeftBorderParticles);
+                }
+                if (gridX == maxX) {
+                    findNeighborsInGhostParticles(particle, receivedRightBorderParticles);
+                }
+
+
+                if (gridX < maxX) findNeighborsInGrid(particle, grid[gridY][gridX + 1]);
+                if (gridY > 0) findNeighborsInGrid(particle, grid[gridY - 1][gridX]);
+                if (gridX > 0) findNeighborsInGrid(particle, grid[gridY][gridX - 1]);
+                if (gridY < maxY) findNeighborsInGrid(particle, grid[gridY + 1][gridX]);
+                if (gridX > 0 && gridY > 0) findNeighborsInGrid(particle, grid[gridY - 1][gridX - 1]);
+                if (gridX > 0 && gridY < maxY) findNeighborsInGrid(particle, grid[gridY + 1][gridX - 1]);
+                if (gridX < maxX && gridY > 0) findNeighborsInGrid(particle, grid[gridY - 1][gridX + 1]);
+                if (gridX < maxX && gridY < maxY) findNeighborsInGrid(particle, grid[gridY + 1][gridX + 1]);
+            } catch (ArrayIndexOutOfBoundsException e) {
+            }
+        }
+    }
+
+    //findNeighborsInGrid: Finds neighboring particles within a specific grid cell for a given particle.
+    static void findNeighborsInGrid(Particle particle, Grid gridCell) {
+        double range = Physics.range;
+        for (Particle particleA : gridCell.getParticlesInGrid()) {
+            if (particle.equals(particleA)) continue;
+            double distance = Math.pow(particle.x - particleA.x, 2) + Math.pow(particle.y - particleA.y, 2);
+            if (distance < range * range) {
+                Neighbor newNeighbor = new Neighbor();
+                newNeighbor.setNeighbor(particle, particleA);
+                neighbors.add(newNeighbor);
+            }
+        }
+    }
+
+    static void findNeighborsInGhostParticles(Particle particle, List<Particle> ghostParticles) {
+        double range = Physics.range;
+        for (Particle ghostParticle : ghostParticles) {
+            double distance = Math.pow(particle.x - ghostParticle.x, 2) + Math.pow(particle.y - ghostParticle.y, 2);
+            if (distance < range * range) {
+                Neighbor newNeighbor = new Neighbor();
+                newNeighbor.setNeighbor(particle, ghostParticle);
+                neighbors.add(newNeighbor);
+            }
+        }
+    }
+
+    //calculatePressure: Calculates the pressure for each particle in the simulation based on its density.
+    public static void calculatePressure() {
+        double density = Physics.density;
+        for (Particle particle : particles) {
+            if (particle.density < density) particle.density = density;
+            particle.pressure = particle.density - density;
+        }
+    }
+
+    //calculateForce: Calculates the forces between particles based on their neighboring relationships.
+    public static void calculateForce() {
+        for (Neighbor neighbor : neighbors) neighbor.calculateForce();
     }
 }
