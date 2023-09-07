@@ -1,6 +1,11 @@
+import java.io.Serial;
+import java.io.Serializable;
 import java.util.Random;
 
-public class Particle{
+public class Particle implements Serializable {
+    @Serial
+    private static final long serialVersionUID = 1L;
+
     public double velocityX, velocityY;
     public double x, y;
     public int radius;

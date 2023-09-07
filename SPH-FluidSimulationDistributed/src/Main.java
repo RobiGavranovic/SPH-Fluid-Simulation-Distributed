@@ -1,10 +1,22 @@
 import mpi.*;
 
+import java.io.*;
 import java.util.ArrayList;
 import java.util.List;
 
 public class Main {
     public static List<Particle> particles;
+    public static Grid[][] grid;
+    //neighboring particles of current processes
+    public static List<Particle> leftBorderParticles = new ArrayList<>();
+    public static List<Particle> rightBorderParticles = new ArrayList<>();
+
+    //neighboring particles of adjacent processes - ghost particles
+    public static List<Particle> receivedLeftBorderParticles = new ArrayList<>();
+    public static List<Particle> receivedRightBorderParticles = new ArrayList<>();
+
+    public static ArrayList<Neighbor> neighbors;
+
 
     public static void main(String args[]) throws Exception {
         MPI.Init(args);
@@ -13,25 +25,25 @@ public class Main {
 
         //each process has it's own rank
         int rank = MPI.COMM_WORLD.Rank();
-        //number of processes (max(rank-1))
+        //number of processes (max(rank+1))
         int size = MPI.COMM_WORLD.Size();
 
         //set initial particle count
         int particleCount = 100;
 
         //get particles per process - to distribute them at the start evenly
-        int particleCountPerProcess = particleCount/size;
+        int particleCountPerProcess = particleCount / size;
 
         //if the division above isnt whole, add the missed out particles to root process
-        if (rank == root){
+        if (rank == root) {
             if (particleCount % size != 0) particleCountPerProcess += particleCount % size;
         }
 
         //todo variables that might need to change destination
 
 
-        //print start statement
-        if (rank == root){
+        //print starting statement
+        if (rank == root) {
             System.out.println("Running distributed model of SPH Fluid Simulation");
             System.out.print(" with " + particleCount + " particles.\n");
         }
@@ -44,17 +56,40 @@ public class Main {
         //now that we know which area each process is going to work on, we can initialize particles for each process in it's area
         particles = initializeParticles(particleCountPerProcess, fromX, toX);
 
+        //initialize empty starting Grid
+        grid = updateGridSize(computingChunk, Physics.height, Physics.gridSize);
+
+        //add particles to the grid
+        updateGrids(fromX);
+
+        //get data of each process's particles that will have to be shared (neighboring particles)
+        getMyNeighboringParticles(rank, size);
+
+        //each process sends rightBorderParticles to the neighboring process on the right, and receives from the process on the left.
+        if (rank == 0)
+            sendParticles(rightBorderParticles, rank + 1);
+        else if (rank == size - 1) receivedLeftBorderParticles = receiveParticles(rank - 1);
+        else receivedLeftBorderParticles = sendRecvParticles(rightBorderParticles, rank + 1, rank - 1);
+
+        //each process sends leftBorderParticles to the neighboring process on the left, and receives from the process on the right.
+        if (rank == 0)
+            receiveParticles(rank + 1);
+        else if (rank == size - 1)
+            sendParticles(leftBorderParticles, rank - 1);
+        else receivedRightBorderParticles = sendRecvParticles(leftBorderParticles, rank - 1, rank + 1);
+
+
 
 
 
         MPI.Finalize();
     }
 
-    static List<Particle> initializeParticles(int n, int from, int to){
+    static List<Particle> initializeParticles(int n, int from, int to) {
         List<Particle> particles = new ArrayList<>();
-        int increment = 5;
+        int increment = 5; //spacing between particles
 
-        //so they arent right at the border)
+        //so they arent right at the border
         from += 2;
         to -= 2;
 
@@ -62,10 +97,10 @@ public class Main {
         int positionY = 10;
         int positionX = from;
 
-        //go trough all particles
+        //go through all particles
         for (int i = 0; i < n; i++) {
-            //if particle's X position is over process's comupational area, X = from, increment Y
-            if (positionX > to){
+            //if particle's X position is over process's computational area, X = from, increment Y
+            if (positionX > to) {
                 positionX = from;
                 positionY += increment;
             }
@@ -74,5 +109,103 @@ public class Main {
         }
         //return particle list, different for each process
         return particles;
+    }
+
+    // Grid Updater: Updates the size of the grid and initializes it.
+    static Grid[][] updateGridSize(double width, double height, double gridSize) {
+        int gridLengthX = (int) Math.floor(width / gridSize) + 1;
+        Grid[][] grid = new Grid[(int) Math.floor(height / gridSize) + 1][gridLengthX];
+
+        for (Grid[] gridArray : grid) {
+            for (int i = 0; i < gridLengthX; i++) {
+                gridArray[i] = new Grid();
+            }
+        }
+        return grid;
+    }
+
+    //parameter from - because we dont have one grid anymore, but rather more grids, each starting from 0, we need to subtract the initial from value
+    static void updateGrids(int from) {
+        int gridSize = Physics.gridSize;
+
+        for (Grid[] grids : grid) for (Grid grid : grids) grid.clearGrid();
+
+        for (Particle particle : particles) {
+            particle.forceX = particle.forceY = particle.density = 0;
+            particle.gridX = (int) Math.floor((particle.x - from) / gridSize);
+            particle.gridY = (int) Math.floor((particle.y - from) / gridSize);
+            if (particle.gridX < 0) particle.gridX = 0;
+            if (particle.gridY < 0) particle.gridY = 0;
+            if (particle.gridX > (Physics.width / gridSize) - 1) particle.gridX = (int) (Physics.width / gridSize) - 1;
+            if (particle.gridY > (Physics.height / gridSize) - 1)
+                particle.gridY = (int) (Physics.height / gridSize) - 1;
+            grid[particle.gridY][particle.gridX].addParticle(particle);
+        }
+    }
+
+    public static void getMyNeighboringParticles(int rank, int size) {
+        // clear from previous iteration
+        leftBorderParticles.clear();
+        rightBorderParticles.clear();
+
+        // if not rank 0, add particles from leftmost cells
+        if (rank != 0) {
+            for (int y = 0; y < grid.length; y++) {
+                leftBorderParticles.addAll(grid[y][0].getParticlesInGrid());
+            }
+        }
+
+        // if not max rank, add particles from rightmost cells
+        if (rank != size - 1) {
+            for (int y = 0; y < grid.length; y++) {
+                rightBorderParticles.addAll(grid[y][grid[0].length - 1].getParticlesInGrid());
+            }
+        }
+    }
+
+    //convert: particles to bytes
+    public static byte[] serialize(Object obj) throws IOException {
+        try (ByteArrayOutputStream bos = new ByteArrayOutputStream();
+             ObjectOutput out = new ObjectOutputStream(bos)) {
+            out.writeObject(obj);
+            return bos.toByteArray();
+        }
+    }
+
+    //convert: bytes to particles
+    public static Object deserialize(byte[] bytes) throws IOException, ClassNotFoundException {
+        try (ByteArrayInputStream bis = new ByteArrayInputStream(bytes);
+             ObjectInput in = new ObjectInputStream(bis)) {
+            return in.readObject();
+        }
+    }
+
+    //send particles list to destRank
+    public static void sendParticles(List<Particle> particles, int destRank) throws IOException {
+        byte[] serializedParticles = serialize(particles);
+        MPI.COMM_WORLD.Send(serializedParticles, 0, serializedParticles.length, MPI.BYTE, destRank, 0);
+    }
+
+    //todo check how much is 1 particle in bytes and appropriately change size of buffer.
+    //receive particles list from sourceRank
+    public static List<Particle> receiveParticles(int sourceRank) throws IOException, ClassNotFoundException {
+        byte[] buffer = new byte[2048];
+        MPI.COMM_WORLD.Recv(buffer, 0, buffer.length, MPI.BYTE, sourceRank, 0);
+        List<Particle> recievedParticles = (List<Particle>) deserialize(buffer);
+        return recievedParticles;
+    }
+
+    //todo check how much is 1 particle in bytes and appropriately change size of buffer.
+    //send particles list to destRank and receive particles list from SourceRank
+    public static List<Particle> sendRecvParticles(List<Particle> particlesToSend, int destRank, int sourceRank) throws IOException, ClassNotFoundException {
+        byte[] serializedParticles = serialize(particlesToSend);
+        byte[] recvBuffer = new byte[2048];
+
+        MPI.COMM_WORLD.Sendrecv(
+                serializedParticles, 0, serializedParticles.length, MPI.BYTE, destRank, 0,
+                recvBuffer, 0, recvBuffer.length, MPI.BYTE, sourceRank, 0
+        );
+        List<Particle> receivedParticles = (List<Particle>) deserialize(recvBuffer);
+        return receivedParticles;
     }
 }
