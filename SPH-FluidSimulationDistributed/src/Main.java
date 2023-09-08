@@ -2,28 +2,34 @@ import mpi.*;
 
 import java.io.*;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 public class Main {
-    public static List<Particle> particles;
-    public static Grid[][] grid;
+    static List<Particle> particles;
+    static Grid[][] grid;
     //neighboring particles of current processes
-    public static List<Particle> leftBorderParticles = new ArrayList<>();
-    public static List<Particle> rightBorderParticles = new ArrayList<>();
+    static List<Particle> leftBorderParticles = new ArrayList<>();
+    static List<Particle> rightBorderParticles = new ArrayList<>();
+    //left and right border particles combined
+    static List<List<Particle>> borderingParticles;
 
     //neighboring particles of adjacent processes - ghost particles
-    public static List<Particle> receivedLeftBorderParticles = new ArrayList<>();
-    public static List<Particle> receivedRightBorderParticles = new ArrayList<>();
+    static List<Particle> receivedLeftBorderParticles = new ArrayList<>();
+    static List<Particle> receivedRightBorderParticles = new ArrayList<>();
 
-    public static ArrayList<Neighbor> neighbors = new ArrayList<>();
+    static ArrayList<Neighbor> neighbors = new ArrayList<>();
 
     //particles that become out of bounds due to movement
-    public static List<Particle> oobLeftBorderParticles = new ArrayList<>();
-    public static List<Particle> oobRightBorderParticles = new ArrayList<>();
+    static List<Particle> oobLeftBorderParticles = new ArrayList<>();
+    static List<Particle> oobRightBorderParticles = new ArrayList<>();
 
     //particles that became in bounds due to movement
-    public static List<Particle> ibLeftBorderParticles = new ArrayList<>();
-    public static List<Particle> ibRightBorderParticles = new ArrayList<>();
+    static List<Particle> ibLeftBorderParticles = new ArrayList<>();
+    static List<Particle> ibRightBorderParticles = new ArrayList<>();
+
+    //length of a single particle in a list in bytes
+    static final int particleLengthInBytes = 385;
 
     public static void main(String[] args) throws Exception {
         MPI.Init(args);
@@ -32,6 +38,7 @@ public class Main {
 
         //each process has it's own rank
         int rank = MPI.COMM_WORLD.Rank();
+
         //number of processes (max(rank+1))
         int size = MPI.COMM_WORLD.Size();
 
@@ -69,18 +76,49 @@ public class Main {
         //get data of each process's particles that will have to be shared (neighboring particles)
         getMyNeighboringParticles(rank, size);
 
+        //todo get information about how much data are we sending, to allocate appropriate buffer size
+
+        //data of bordering collum grid's particles
+        byte[] serializedRight = serialize(rightBorderParticles);
+        byte[] serializedLeft = serialize(leftBorderParticles);
+
+        //serialized "bordering collum grid's particles" length - used as information for buffer size (*particleLengthInBytes)
+        byte[] serializedRightLength = serialize(serializedRight.length);
+        byte[] serializedLeftLength = serialize(serializedLeft.length);
+
+        //buffer size received from neighboring processes
+        int receivedBufferSizeRight = 0;
+        int receivedBufferSizeLeft = 0;
+
+//todo recheck everything
+        //first send information about how much data we're actually going to send
+        if (rank == 0)
+            sendParticles(serializedRightLength, rank + 1);
+        else if (rank == size - 1) receivedBufferSizeLeft = receiveBufferSize(rank - 1);
+        else receivedBufferSizeLeft = sendRecvBufferSize(serializedRightLength, rank + 1, rank - 1);
+
+        if (rank == 0)
+            receivedBufferSizeRight = receiveBufferSize(rank + 1);
+        else if (rank == size - 1)
+            sendParticles(serializedLeftLength, rank - 1);
+        else receivedBufferSizeRight = sendRecvBufferSize(serializedLeftLength, rank - 1, rank + 1);
+
+
+//todo adjust parameters
         //each process sends rightBorderParticles to the neighboring process on the right, and receives from the process on the left.
         if (rank == 0)
-            sendParticles(rightBorderParticles, rank + 1);
-        else if (rank == size - 1) receivedLeftBorderParticles = receiveParticles(rank - 1);
-        else receivedLeftBorderParticles = sendRecvParticles(rightBorderParticles, rank + 1, rank - 1);
+            sendParticles(serializedRight, rank + 1);
+        else if (rank == size - 1) receivedLeftBorderParticles = receiveParticles(rank - 1, receivedBufferSizeLeft);
+        else
+            receivedLeftBorderParticles = sendRecvParticles(serializedRight, rank + 1, rank - 1, receivedBufferSizeLeft);
 
         //each process sends leftBorderParticles to the neighboring process on the left, and receives from the process on the right.
         if (rank == 0)
-            receivedRightBorderParticles = receiveParticles(rank + 1);
+            receivedRightBorderParticles = receiveParticles(rank + 1, receivedBufferSizeRight);
         else if (rank == size - 1)
-            sendParticles(leftBorderParticles, rank - 1);
-        else receivedRightBorderParticles = sendRecvParticles(leftBorderParticles, rank - 1, rank + 1);
+            sendParticles(serializedLeft, rank - 1);
+        else
+            receivedRightBorderParticles = sendRecvParticles(serializedLeft, rank - 1, rank + 1, receivedBufferSizeRight);
 
         //find neighbors in grid, including the ghost particles
         findNeighbors();
@@ -93,37 +131,64 @@ public class Main {
 
         for (Particle particle : particles) particle.move();
 
-        //todo check if particles have now moved out of the process's computing area - if so then send it to another process. Receive particles from other processes
-        for (Particle particle : leftBorderParticles){
-            if (particle.x < fromX) oobLeftBorderParticles.add(particle);
-            else if (particle.x > toX) oobRightBorderParticles.add(particle);
+        //check if particles have now moved out of the process's computing area - if so then send it to another process. Receive particles from other processes
+
+        //list of particle lists
+        borderingParticles = Arrays.asList(leftBorderParticles, rightBorderParticles);
+
+        //iterate over these two lists, and each particle inside - if the particle if out of bounds for that process, discard it and add it to the list to be sent off to another process
+        for (List<Particle> borderingParticle : borderingParticles) {
+
+            for (Particle particle : borderingParticle) {
+                if (particle.x < fromX) {
+                    oobLeftBorderParticles.add(particle);
+                    particles.remove(particle);
+                } else if (particle.x > toX) {
+                    oobRightBorderParticles.add(particle);
+                    particles.remove(particle);
+                }
+            }
         }
 
-        for (Particle particle : oobRightBorderParticles){
-            if (particle.x < fromX) oobLeftBorderParticles.add(particle);
-            else if (particle.x > toX) oobRightBorderParticles.add(particle);
-        }
+        //todo
+        byte[] serializedOobRight = serialize(oobRightBorderParticles);
+        byte[] serializedOobLeft = serialize(oobLeftBorderParticles);
+
+        //todo
+        byte[] serializedOobRightLength = serialize(serializedOobRight.length);
+        byte[] serializedOobLeftLength = serialize(serializedOobLeft.length);
+
+//todo recheck this
+        //first send information about how much data we're actually going to send
+        if (rank == 0)
+            sendParticles(serializedOobRightLength, rank + 1);
+        else if (rank == size - 1) receivedBufferSizeLeft = receiveBufferSize(rank - 1);
+        else receivedBufferSizeLeft = sendRecvBufferSize(serializedOobRightLength, rank + 1, rank - 1);
+
+        if (rank == 0)
+            receivedBufferSizeRight = receiveBufferSize(rank + 1);
+        else if (rank == size - 1)
+            sendParticles(serializedOobLeftLength, rank - 1);
+        else receivedBufferSizeRight = sendRecvBufferSize(serializedOobLeftLength, rank - 1, rank + 1);
+
+
         //send to right, receive from left
         if (rank == 0)
-            sendParticles(oobRightBorderParticles, rank + 1);
-        else if (rank == size - 1) ibLeftBorderParticles = receiveParticles(rank - 1);
-        else ibLeftBorderParticles = sendRecvParticles(oobRightBorderParticles, rank + 1, rank - 1);
+            sendParticles(serializedOobRight, rank + 1);
+        else if (rank == size - 1) ibLeftBorderParticles = receiveParticles(rank - 1, receivedBufferSizeLeft);
+        else ibLeftBorderParticles = sendRecvParticles(serializedOobRight, rank + 1, rank - 1, receivedBufferSizeLeft);
 
         //send to left, receive from right
         if (rank == 0)
-            ibRightBorderParticles = receiveParticles(rank + 1);
+            ibRightBorderParticles = receiveParticles(rank + 1, receivedBufferSizeRight);
         else if (rank == size - 1)
-            sendParticles(ibLeftBorderParticles, rank - 1);
-        else ibRightBorderParticles = sendRecvParticles(ibLeftBorderParticles, rank - 1, rank + 1);
+            sendParticles(serializedOobLeft, rank - 1);
+        else ibRightBorderParticles = sendRecvParticles(serializedOobLeft, rank - 1, rank + 1, receivedBufferSizeRight);
 
-        particles.removeIf(particle -> oobRightBorderParticles.contains(particle) || rightBorderParticles.contains(particle));
         particles.addAll(ibLeftBorderParticles);
         particles.addAll(ibRightBorderParticles);
 
-        //todo send msg like before, also recieve as before
-        //todo send empty msg (if no oob particles) to avoid deadlock
-
-
+        
 
 
         MPI.Finalize();
@@ -225,33 +290,54 @@ public class Main {
         }
     }
 
-    //send particles list to destRank
-    public static void sendParticles(List<Particle> particles, int destRank) throws IOException {
-        byte[] serializedParticles = serialize(particles);
-        MPI.COMM_WORLD.Send(serializedParticles, 0, serializedParticles.length, MPI.BYTE, destRank, 0);
+    //send already serialized data to destRank
+    public static void sendParticles(byte[] data, int destRank) throws IOException {
+        MPI.COMM_WORLD.Send(data, 0, data.length, MPI.BYTE, destRank, 0);
     }
 
     //todo check how much is 1 particle in bytes and appropriately change size of buffer.
     //receive particles list from sourceRank
-    public static List<Particle> receiveParticles(int sourceRank) throws IOException, ClassNotFoundException {
-        byte[] buffer = new byte[2048];
+    public static List<Particle> receiveParticles(int sourceRank, int bufferSize) throws IOException, ClassNotFoundException {
+        byte[] buffer = new byte[bufferSize];
         MPI.COMM_WORLD.Recv(buffer, 0, buffer.length, MPI.BYTE, sourceRank, 0);
         List<Particle> receivedParticles = (List<Particle>) deserialize(buffer);
         return receivedParticles;
     }
 
+    //todo adjust buffer
+    //receive information about the size of the buffer
+    public static int receiveBufferSize(int sourceRank) throws IOException, ClassNotFoundException {
+        byte[] buffer = new byte[2048];
+        MPI.COMM_WORLD.Recv(buffer, 0, buffer.length, MPI.BYTE, sourceRank, 0);
+        int bufferSize = (int) deserialize(buffer);
+        return bufferSize;
+    }
+
+
     //todo check how much is 1 particle in bytes and appropriately change size of buffer.
     //send particles list to destRank and receive particles list from SourceRank
-    public static List<Particle> sendRecvParticles(List<Particle> particlesToSend, int destRank, int sourceRank) throws IOException, ClassNotFoundException {
-        byte[] serializedParticles = serialize(particlesToSend);
-        byte[] recvBuffer = new byte[2048];
+    public static List<Particle> sendRecvParticles(byte[] data, int destRank, int sourceRank, int bufferSize) throws IOException, ClassNotFoundException {
+        byte[] recvBuffer = new byte[bufferSize];
 
         MPI.COMM_WORLD.Sendrecv(
-                serializedParticles, 0, serializedParticles.length, MPI.BYTE, destRank, 0,
+                data, 0, data.length, MPI.BYTE, destRank, 0,
                 recvBuffer, 0, recvBuffer.length, MPI.BYTE, sourceRank, 0
         );
         List<Particle> receivedParticles = (List<Particle>) deserialize(recvBuffer);
         return receivedParticles;
+    }
+
+    //todo adjust buffer
+    //send buffer size to destRank and receive buffer size from SourceRank
+    public static int sendRecvBufferSize(byte[] data, int destRank, int sourceRank) throws IOException, ClassNotFoundException {
+        byte[] recvBuffer = new byte[2048];
+
+        MPI.COMM_WORLD.Sendrecv(
+                data, 0, data.length, MPI.BYTE, destRank, 0,
+                recvBuffer, 0, recvBuffer.length, MPI.BYTE, sourceRank, 0
+        );
+        int bufferSize = (int) deserialize(recvBuffer);
+        return bufferSize;
     }
 
     //findNeighbors: Clears previous neighbors list and finds current neighbors for each particle in the simulation
