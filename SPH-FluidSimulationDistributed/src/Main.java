@@ -28,51 +28,37 @@ public class Main {
     static List<Particle> ibLeftBorderParticles = new ArrayList<>();
     static List<Particle> ibRightBorderParticles = new ArrayList<>();
 
-    public static void main(String[] args) throws Exception {
-        MPI.Init(args);
-        //id of root process
-        int root = 0;
-
-        //each process has it's own rank
-        int rank = MPI.COMM_WORLD.Rank();
-
-        //number of processes (max(rank+1))
-        int size = MPI.COMM_WORLD.Size();
-
-        //set initial particle count
-        int particleCount = 100;
-
-        //get particles per process - to distribute them at the start evenly
-        int particleCountPerProcess = particleCount / size;
-
-        //if the division above isnt whole, add the missed out particles to root process
-        if (rank == root) {
-            if (particleCount % size != 0) particleCountPerProcess += particleCount % size;
-        }
-
-        //print starting statement
-        if (rank == root) {
-            System.out.println("Running distributed model of SPH Fluid Simulation");
-            System.out.print(" with " + particleCount + " particles.\n");
-        }
-
-        //get computing area for each process
-        int computingChunk = Physics.width / size;
-        int fromX = rank * computingChunk;
-        int toX = fromX + computingChunk;
-
-        //now that we know which area each process is going to work on, we can initialize particles for each process in it's area
-        particles = initializeParticles(particleCountPerProcess, fromX, toX);
-
-        //initialize empty starting Grid
-        grid = updateGridSize(computingChunk);
-
+    static void simulateTick(int rank, int size, int fromX, int toX) throws IOException, ClassNotFoundException {
         //add particles to the grid
         updateGrids(fromX);
 
         //get data of each process's particles that will have to be shared (neighboring particles)
         getMyNeighboringParticles(rank, size);
 
+        sendRecvBorderingParticles(rank, size);
+
+        //find neighbors in grid, including the ghost particles
+        findNeighbors();
+
+        //calculate pressure for each particle
+        calculatePressure();
+
+        //calculate force for each particle
+        calculateForce();
+
+        for (Particle particle : particles) particle.move();
+
+        sortGhostParticles(fromX, toX);
+
+        sendRecvGhostParticles(rank, size);
+
+        //add new in bounds particles to the list of particles
+        particles.addAll(ibLeftBorderParticles);
+        particles.addAll(ibRightBorderParticles);
+
+    }
+
+    static void sendRecvBorderingParticles(int rank, int size) throws IOException, ClassNotFoundException {
         //data of bordering collum grid's particles
         byte[] serializedRight = serialize(rightBorderParticles);
         byte[] serializedLeft = serialize(leftBorderParticles);
@@ -119,20 +105,9 @@ public class Main {
             sendParticles(serializedLeft, rank - 1);
         else
             receivedRightBorderParticles = sendRecvParticles(serializedLeft, rank - 1, rank + 1, bufferSizeRight);
+    }
 
-        //find neighbors in grid, including the ghost particles
-        findNeighbors();
-
-        //calculate pressure for each particle
-        calculatePressure();
-
-        //calculate force for each particle
-        calculateForce();
-
-        for (Particle particle : particles) particle.move();
-
-    //now check if particles have moved out of the process's computing area - if so then send it to another process. Receive particles from other processes
-
+    static void sortGhostParticles(int fromX, int toX){
         //list of particle lists - both borders
         borderingParticles = Arrays.asList(leftBorderParticles, rightBorderParticles);
 
@@ -149,6 +124,13 @@ public class Main {
                 }
             }
         }
+    }
+
+    //check if particles have moved out of the process's computing area - if so then send it to another process. Receive particles from other processes
+    static void sendRecvGhostParticles(int rank, int size) throws IOException, ClassNotFoundException {
+        //particle size received from neighboring processes
+        int receivedParticleSizeRight = 0;
+        int receivedParticleSizeLeft = 0;
 
         //serialized particle lists to be sent off to another process
         byte[] serializedOobRight = serialize(oobRightBorderParticles);
@@ -171,8 +153,8 @@ public class Main {
         else receivedParticleSizeRight = sendRecvBufferSize(serializedOobLeftLength, rank - 1, rank + 1);
 
         //get buffer size of incoming data
-        bufferSizeRight = getBufferSize(receivedParticleSizeRight);
-        bufferSizeLeft= getBufferSize(receivedParticleSizeLeft);
+        int bufferSizeRight = getBufferSize(receivedParticleSizeRight);
+        int bufferSizeLeft= getBufferSize(receivedParticleSizeLeft);
 
         //send to right, receive from left
         if (rank == 0)
@@ -186,10 +168,49 @@ public class Main {
         else if (rank == size - 1)
             sendParticles(serializedOobLeft, rank - 1);
         else ibRightBorderParticles = sendRecvParticles(serializedOobLeft, rank - 1, rank + 1, bufferSizeRight);
+    }
 
-        //add new in bounds particles to the list of particles
-        particles.addAll(ibLeftBorderParticles);
-        particles.addAll(ibRightBorderParticles);
+    public static void main(String[] args) throws Exception {
+        MPI.Init(args);
+        //id of root process
+        int root = 0;
+
+        //each process has it's own rank
+        int rank = MPI.COMM_WORLD.Rank();
+
+        //number of processes (max(rank+1))
+        int size = MPI.COMM_WORLD.Size();
+
+        //set initial particle count
+        int particleCount = 100;
+
+        //get particles per process - to distribute them at the start evenly
+        int particleCountPerProcess = particleCount / size;
+
+        //if the division above isnt whole, add the missed out particles to root process
+        if (rank == root) {
+            if (particleCount % size != 0) particleCountPerProcess += particleCount % size;
+        }
+
+        //print starting statement
+        if (rank == root) {
+            System.out.println("Running distributed model of SPH Fluid Simulation");
+            System.out.print(" with " + particleCount + " particles.\n");
+        }
+
+        //get computing area for each process
+        int computingChunk = Physics.width / size;
+        int fromX = rank * computingChunk;
+        int toX = fromX + computingChunk;
+
+        //now that we know which area each process is going to work on, we can initialize particles for each process in it's area
+        particles = initializeParticles(particleCountPerProcess, fromX, toX);
+
+        //initialize empty starting Grid
+        grid = updateGridSize(computingChunk);
+
+
+        simulateTick(rank, size, fromX, toX);
 
 
         MPI.Finalize();
