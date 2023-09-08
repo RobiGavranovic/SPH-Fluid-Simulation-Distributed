@@ -17,6 +17,14 @@ public class Main {
 
     public static ArrayList<Neighbor> neighbors = new ArrayList<>();
 
+    //particles that become out of bounds due to movement
+    public static List<Particle> oobLeftBorderParticles = new ArrayList<>();
+    public static List<Particle> oobRightBorderParticles = new ArrayList<>();
+
+    //particles that became in bounds due to movement
+    public static List<Particle> ibLeftBorderParticles = new ArrayList<>();
+    public static List<Particle> ibRightBorderParticles = new ArrayList<>();
+
     public static void main(String[] args) throws Exception {
         MPI.Init(args);
         //id of root process
@@ -37,9 +45,6 @@ public class Main {
         if (rank == root) {
             if (particleCount % size != 0) particleCountPerProcess += particleCount % size;
         }
-
-        //todo variables that might need to change destination
-
 
         //print starting statement
         if (rank == root) {
@@ -72,7 +77,7 @@ public class Main {
 
         //each process sends leftBorderParticles to the neighboring process on the left, and receives from the process on the right.
         if (rank == 0)
-            receiveParticles(rank + 1);
+            receivedRightBorderParticles = receiveParticles(rank + 1);
         else if (rank == size - 1)
             sendParticles(leftBorderParticles, rank - 1);
         else receivedRightBorderParticles = sendRecvParticles(leftBorderParticles, rank - 1, rank + 1);
@@ -89,6 +94,35 @@ public class Main {
         for (Particle particle : particles) particle.move();
 
         //todo check if particles have now moved out of the process's computing area - if so then send it to another process. Receive particles from other processes
+        for (Particle particle : leftBorderParticles){
+            if (particle.x < fromX) oobLeftBorderParticles.add(particle);
+            else if (particle.x > toX) oobRightBorderParticles.add(particle);
+        }
+
+        for (Particle particle : oobRightBorderParticles){
+            if (particle.x < fromX) oobLeftBorderParticles.add(particle);
+            else if (particle.x > toX) oobRightBorderParticles.add(particle);
+        }
+        //send to right, receive from left
+        if (rank == 0)
+            sendParticles(oobRightBorderParticles, rank + 1);
+        else if (rank == size - 1) ibLeftBorderParticles = receiveParticles(rank - 1);
+        else ibLeftBorderParticles = sendRecvParticles(oobRightBorderParticles, rank + 1, rank - 1);
+
+        //send to left, receive from right
+        if (rank == 0)
+            ibRightBorderParticles = receiveParticles(rank + 1);
+        else if (rank == size - 1)
+            sendParticles(ibLeftBorderParticles, rank - 1);
+        else ibRightBorderParticles = sendRecvParticles(ibLeftBorderParticles, rank - 1, rank + 1);
+
+        particles.removeIf(particle -> oobRightBorderParticles.contains(particle) || rightBorderParticles.contains(particle));
+        particles.addAll(ibLeftBorderParticles);
+        particles.addAll(ibRightBorderParticles);
+
+        //todo send msg like before, also recieve as before
+        //todo send empty msg (if no oob particles) to avoid deadlock
+
 
 
 
