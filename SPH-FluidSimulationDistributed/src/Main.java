@@ -39,8 +39,13 @@ public class Main {
         //number of processes (max(rank+1))
         int size = MPI.COMM_WORLD.Size();
 
+        if (size > 20) {
+            System.out.println("Too many processes, MAX (MPI.COMM_WORLD.Size) = 20. This is due to window size and gridcell size");
+            System.exit(0);
+        }
+
         //set initial particle count
-        int particleCount = 1500;
+        int particleCount = 3000;
 
         //get particles per process - to distribute them at the start evenly
         int particleCountPerProcess = particleCount / size;
@@ -144,22 +149,18 @@ public class Main {
 
             //now check if particles have moved out of the process's computing area - if so then send it to another process. Receive particles from other processes
 
-            //list of particle lists - both borders
-            borderingParticles = Arrays.asList(leftBorderParticles, rightBorderParticles);
-
-            //iterate over these two lists, and each particle inside - if the particle is out of bounds for that process, discard it and add it to the list to be sent off to another process
-            for (List<Particle> borderingParticle : borderingParticles) {
-
-                for (Particle particle : borderingParticle) {
-                    if (particle.x < fromX) {
-                        oobLeftBorderParticles.add(particle);
-                        particles.remove(particle);
-                    } else if (particle.x > toX) {
-                        oobRightBorderParticles.add(particle);
-                        particles.remove(particle);
-                    }
+            //check out of bounds particles
+            for (Particle particle : particles) {
+                if (particle.x < fromX) {
+                    oobLeftBorderParticles.add(particle);
+                } else if (particle.x > toX) {
+                    oobRightBorderParticles.add(particle);
                 }
             }
+
+            //remove out of bounds particles
+            particles.removeAll(oobLeftBorderParticles);
+            particles.removeAll(oobRightBorderParticles);
 
             //serialized particle lists to be sent off to another process
             byte[] serializedOobRight = serialize(oobRightBorderParticles);
@@ -202,8 +203,11 @@ public class Main {
             particles.addAll(ibLeftBorderParticles);
             particles.addAll(ibRightBorderParticles);
 
-            if (rank == 0) System.out.println("PARTICLES: " + particles.size());
-        }
+            //if (rank == 0) System.out.println("PARTICLES: " + particles.size());
+
+            MPI.COMM_WORLD.Barrier();
+
+            }
 
         MPI.Finalize();
     }
@@ -292,9 +296,8 @@ public class Main {
     public static int getBufferSize(int recievedParticleSize) {
         int bufferSizeRight;
         // 58 - null list, 385 - list and one particle, particle within list = 106, 279 - initialized list
-        if (recievedParticleSize == 0) bufferSizeRight = 58;
-        else if (recievedParticleSize == 1) bufferSizeRight = 385;
-        else bufferSizeRight = 279 + recievedParticleSize * 106;
+        if (recievedParticleSize == 0) bufferSizeRight = 59;
+        else bufferSizeRight = 280 + recievedParticleSize * 106;
 
         return bufferSizeRight;
     }
