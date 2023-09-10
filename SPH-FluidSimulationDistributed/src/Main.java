@@ -2,7 +2,6 @@ import mpi.*;
 
 import java.io.*;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 public class Main {
@@ -28,6 +27,8 @@ public class Main {
     static List<Particle> ibLeftBorderParticles = new ArrayList<>();
     static List<Particle> ibRightBorderParticles = new ArrayList<>();
 
+    static List<Particle> allParticlesInRange = new ArrayList<>();
+
     public static void main(String[] args) throws Exception {
         MPI.Init(args);
         //id of root process
@@ -45,7 +46,7 @@ public class Main {
         }
 
         //set initial particle count
-        int particleCount = 3000;
+        int particleCount = 1000;
 
         //get particles per process - to distribute them at the start evenly
         int particleCountPerProcess = particleCount / size;
@@ -73,7 +74,7 @@ public class Main {
         grid = updateGridSize(computingChunk);
 
         int count = 0;
-        while (count < 3000) {
+        while (count < 10000) {
             count++;
 
             //override lists, let garbage collector work
@@ -135,6 +136,11 @@ public class Main {
                 sendParticles(serializedLeft, rank - 1);
             else
                 receivedRightBorderParticles = sendRecvParticles(serializedLeft, rank - 1, rank + 1, bufferSizeRight);
+
+            allParticlesInRange.clear();
+            allParticlesInRange.addAll(particles);
+            allParticlesInRange.addAll(receivedLeftBorderParticles);
+            allParticlesInRange.addAll(receivedRightBorderParticles);
 
             //find neighbors in grid, including the ghost particles
             findNeighbors();
@@ -203,11 +209,9 @@ public class Main {
             particles.addAll(ibLeftBorderParticles);
             particles.addAll(ibRightBorderParticles);
 
-            //if (rank == 0) System.out.println("PARTICLES: " + particles.size());
-
+            //wait for all processes before new iteration
             MPI.COMM_WORLD.Barrier();
-
-            }
+        }
 
         MPI.Finalize();
     }
@@ -371,7 +375,7 @@ public class Main {
         neighbors.clear();
         int gridSize = Physics.gridSize;
 
-        for (Particle particle : particles) {
+        for (Particle particle : allParticlesInRange) {
             int gridX = particle.gridX;
             int gridY = particle.gridY;
 
